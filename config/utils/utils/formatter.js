@@ -1,11 +1,7 @@
-// utils/formatter.js
-function formatPrice(price, currency = "usd") {
-  return `${price.toFixed(2)} ${currency.toUpperCase()}`;
+function formatPrice(num) {
+  if (num === null || num === undefined || Number.isNaN(num)) return 'N/A';
+  if (num >= 1) return Number(num).toLocaleString(undefined, { maximumFractionDigits: 6 });
+  return Number(num).toPrecision(6);
 }
 
-function formatChange(change) {
-  const sign = change >= 0 ? "+" : "-";
-  return `${sign}${Math.abs(change).toFixed(2)}%`;
-}
-
-module.exports = { formatPrice, formatChange };
+module.exports = { formatPrice };
