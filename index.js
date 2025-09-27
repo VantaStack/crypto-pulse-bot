@@ -1,12 +1,8 @@
 require('dotenv').config();
-const { startBot } = require('./src/bot');
+const bot = require('./src/bot');
 
-(async () => {
-  try {
-    await startBot();
-    console.log('Crypto Pulse Bot is up and running.');
-  } catch (error) {
-    console.error('Error starting the bot:', error);
-    process.exit(1);
-  }
-})();
+bot.launch().then(() => {
+  console.log('🤖 Bot is running...');
+}).catch(err => {
+  console.error('❌ Failed to start bot:', err);
+});
