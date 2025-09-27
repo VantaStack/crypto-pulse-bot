@@ -1,8 +1,8 @@
-// config/config.js
-require("dotenv").config();
+require('dotenv').config();
+const { TELEGRAM_TOKEN, PREFERRED_PROVIDERS, NODE_ENV } = process.env;
 
 module.exports = {
-  botToken: process.env.BOT_TOKEN || "",
-  defaultCurrency: process.env.DEFAULT_CURRENCY || "usd",
-  logLevel: process.env.LOG_LEVEL || "info",
+  TELEGRAM_TOKEN,
+  PREFERRED_PROVIDERS: PREFERRED_PROVIDERS ? PREFERRED_PROVIDERS.split(',').map(s => s.trim()) : ['coingecko','binance'],
+  NODE_ENV: NODE_ENV || 'development',
 };
