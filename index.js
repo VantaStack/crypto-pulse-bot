@@ -1,8 +1,11 @@
-require('dotenv').config();
-const bot = require('./src/bot');
+const { startBot } = require('./src/bot');
+const logger = require('./config/logger');
 
-bot.launch().then(() => {
-  console.log('🤖 Bot is running...');
-}).catch(err => {
-  console.error('❌ Failed to start bot:', err);
-});
+(async () => {
+  try {
+    await startBot();
+  } catch (err) {
+    logger.error({msg:'Failed starting bot', err: err.message || err});
+    process.exit(1);
+  }
+})();
