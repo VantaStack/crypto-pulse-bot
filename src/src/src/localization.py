@@ -4,7 +4,11 @@ localization.py
 English/Persian messages and helpers.
 """
 
+from __future__ import annotations
 from dataclasses import dataclass
+from typing import Literal
+
+Lang = Literal["en", "fa"]
 
 
 @dataclass(frozen=True)
@@ -18,6 +22,18 @@ class Messages:
     INLINE_HINT: str
     RATE_LIMIT: str
     NOT_ALLOWED: str
+
+    def fmt(self, key: str, /, **kwargs) -> str:
+        """
+        Safe formatter: returns formatted value for a message key.
+        Usage: messages.fmt("START") or messages.fmt("ERROR", symbol="BTC")
+        """
+        val = getattr(self, key, None)
+        if val is None:
+            raise KeyError(f"Unknown message key: {key}")
+        if kwargs:
+            return val.format(**kwargs)
+        return val
 
 
 EN = Messages(
@@ -71,5 +87,22 @@ FA = Messages(
 )
 
 
-def get_messages(lang: str) -> Messages:
-    return EN if lang.lower() != "fa" else FA
+_SUPPORTED: dict[str, Messages] = {"en": EN, "fa": FA}
+
+
+def _normalize_lang(lang: str | None) -> str:
+    if not lang:
+        return "en"
+    l = lang.strip().lower()
+    if l.startswith("fa"):
+        return "fa"
+    return "en"
+
+
+def get_messages(lang: str | None = None) -> Messages:
+    """
+    Return Messages for the requested language.
+    Accepts values like 'en', 'EN', 'fa', 'fa-IR'. Defaults to English.
+    """
+    code = _normalize_lang(lang)
+    return _SUPPORTED[code]
