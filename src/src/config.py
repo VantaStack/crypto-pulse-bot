@@ -1,40 +1,28 @@
-"""
-config.py
----------
-Environment-backed settings using Pydantic for validation.
-"""
+from __future__ import annotations
+from pydantic import BaseSettings, Field, validator
+from typing import Optional
 
-from pydantic import BaseModel, Field, ValidationError
-import os
+class Settings(BaseSettings):
+    bot_token: str = Field(..., env="BOT_TOKEN")
+    allowed_chats: Optional[str] = Field(None, env="ALLOWED_CHATS")
+    cache_ttl: int = Field(30, env="CACHE_TTL")
+    http_retries: int = Field(3, env="HTTP_RETRIES")
+    http_timeout: int = Field(10, env="HTTP_TIMEOUT")
+    parse_mode: str = Field("MarkdownV2", env="PARSE_MODE")
 
-
-class Settings(BaseModel):
-    bot_token: str = Field(..., alias="BOT_TOKEN")
-    default_lang: str = Field("en", alias="DEFAULT_LANG")
-    cache_ttl: int = Field(60, alias="CACHE_TTL")
-    allowed_chats: str = Field("", alias="ALLOWED_CHATS")
+    @validator("allowed_chats", pre=True)
+    def normalize_allowed_chats(cls, v):
+        if v is None:
+            return None
+        return ",".join(part.strip() for part in str(v).split(",") if part.strip())
 
     def is_chat_allowed(self, chat_id: int) -> bool:
-        """Check if a chat_id is allowed based on comma-separated ALLOWED_CHATS."""
         if not self.allowed_chats:
             return True
-        try:
-            allowed = {
-                int(x.strip())
-                for x in self.allowed_chats.split(",")
-                if x.strip().isdigit()
-            }
-        except ValueError:
-            return True
+        allowed = set()
+        for part in self.allowed_chats.split(","):
+            try:
+                allowed.add(int(part))
+            except ValueError:
+                continue
         return chat_id in allowed
-
-
-def load_settings() -> Settings:
-    env = {k: v for k, v in os.environ.items()}
-    try:
-        return Settings.model_validate(env)
-    except ValidationError as e:
-        raise RuntimeError(f"Invalid configuration: {e}") from e
-
-
-SETTINGS = load_settings()
