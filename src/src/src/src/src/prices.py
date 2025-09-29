@@ -1,80 +1,51 @@
-"""
-prices.py
----------
-Fetch and cache crypto/fiat prices from CoinGecko with retry/backoff.
-"""
-
+# src/prices.py
+from __future__ import annotations
 import asyncio
-import logging
-from decimal import Decimal
+import aiohttp
 from typing import Optional
-
-import httpx
-from cachetools import TTLCache
+from decimal import Decimal
+import time
+import logging
 
 logger = logging.getLogger(__name__)
 
-COINGECKO_URL = "https://api.coingecko.com/api/v3"
-FIAT_CODES = {"usd", "eur", "cad", "irr", "gbp", "try", "jpy", "cny"}
-
-
 class PriceService:
-    """Service to fetch and cache crypto/fiat prices."""
+    def __init__(self, session: aiohttp.ClientSession, cache_ttl: int = 30, retries: int = 3, timeout: int = 10):
+        self._session = session
+        self._cache: dict[str, tuple[Decimal, float]] = {}
+        self._ttl = cache_ttl
+        self._retries = retries
+        self._timeout = timeout
 
-    def __init__(self, ttl: int = 60) -> None:
-        self.cache: TTLCache[str, Decimal] = TTLCache(maxsize=2048, ttl=ttl)
-        self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(10.0),
-            headers={"User-Agent": "CryptoPulseBot/1.0"},
-        )
-
-    async def close(self) -> None:
-        """Close the HTTP client session."""
-        await self.client.aclose()
-
-    async def _request(self, url: str, params: dict, retries: int = 3) -> dict:
-        """Perform GET request with retry and exponential backoff."""
-        backoff = 0.5
-        for attempt in range(retries):
+    async def get_price(self, base: str, quote: str) -> Optional[Decimal]:
+        key = f"{base.lower()}:{quote.lower()}"
+        now = time.time()
+        cached = self._cache.get(key)
+        if cached and now - cached[1] < self._ttl:
+            return cached[0]
+        # try CoinGecko simple price
+        url = "https://api.coingecko.com/api/v3/simple/price"
+        params = {"ids": base.lower(), "vs_currencies": quote.lower()}
+        for attempt in range(1, self._retries + 1):
             try:
-                response = await self.client.get(url, params=params)
-                if response.status_code == 429:  # rate limited
-                    await asyncio.sleep(backoff)
-                    backoff *= 2
-                    continue
-                response.raise_for_status()
-                return response.json()
-            except httpx.HTTPError as exc:
-                logger.warning("HTTP error on attempt %d: %s", attempt + 1, exc)
-                await asyncio.sleep(backoff)
-                backoff *= 2
-        return {}
+                async with self._session.get(url, params=params, timeout=self._timeout) as resp:
+                    if resp.status != 200:
+                        text = await resp.text()
+                        logger.warning("CoinGecko non-200 %s: %s", resp.status, text)
+                        raise RuntimeError("Bad response")
+                    data = await resp.json()
+                    price = data.get(base.lower(), {}).get(quote.lower())
+                    if price is None:
+                        return None
+                    dec = Decimal(str(price))
+                    self._cache[key] = (dec, now)
+                    return dec
+            except asyncio.TimeoutError:
+                logger.warning("Timeout fetching price %s/%s attempt=%d", base, quote, attempt)
+            except Exception as exc:
+                logger.exception("Error fetching price %s/%s attempt=%d: %s", base, quote, attempt, exc)
+            await asyncio.sleep(0.5 * attempt)
+        return None
 
-    async def get_price(self, base_id: str, quote_id: str) -> Optional[Decimal]:
-        """
-        Get the price of base_id in terms of quote_id.
-        Returns Decimal or None if not available.
-        """
-        key = f"{base_id}:{quote_id}"
-        if key in self.cache:
-            return self.cache[key]
-
-        url = f"{COINGECKO_URL}/simple/price"
-        if quote_id in FIAT_CODES:
-            params = {"ids": base_id, "vs_currencies": quote_id}
-            data = await self._request(url, params)
-            value = data.get(base_id, {}).get(quote_id)
-            if value is None:
-                return None
-            price = Decimal(str(value))
-        else:
-            params = {"ids": f"{base_id},{quote_id}", "vs_currencies": "usd"}
-            data = await self._request(url, params)
-            base_usd = data.get(base_id, {}).get("usd")
-            quote_usd = data.get(quote_id, {}).get("usd")
-            if not base_usd or not quote_usd:
-                return None
-            price = Decimal(str(base_usd)) / Decimal(str(quote_usd))
-
-        self.cache[key] = price
-        return price
+    def clear_cache(self) -> None:
+        self._cache.clear()
