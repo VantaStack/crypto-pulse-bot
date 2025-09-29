@@ -1,0 +1,10 @@
+version: "3.9"
+services:
+  bot:
+    build: .
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - DEFAULT_LANG=${DEFAULT_LANG:-en}
+      - CACHE_TTL=${CACHE_TTL:-60}
+      - ALLOWED_CHATS=${ALLOWED_CHATS}
+    restart: unless-stopped
