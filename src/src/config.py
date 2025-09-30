@@ -1,40 +1,68 @@
+# src/config.py
 """
-Application settings loader.
+Typed configuration using Pydantic BaseSettings.
 
-- Pydantic BaseSettings for strong-typed ENV loading
-- Normalizes and validates allowed chat IDs (accepts negative IDs)
-- Exposes helper methods: get_allowed_chats, is_chat_allowed
-- Keeps defaults sane for local dev and CI
+Environment keys:
+- BOT_TOKEN (required)
+- CACHE_TTL (default: 60)
+- HTTP_RETRIES (default: 3)
+- HTTP_TIMEOUT (default: 10)
+- PARSE_MODE (default: HTML)
+- RATE_LIMIT_COOLDOWN (default: 0.7)
+- LOG_LEVEL (default: INFO)
+- ALLOWED_CHATS (comma-separated ints; empty=allow all)
+
+Provides:
+- Settings: typed access to env values
+- is_chat_allowed(chat_id): safe check supporting negative/positive IDs
 """
 from __future__ import annotations
 
-from typing import Optional, Set
+from typing import List, Optional
 from pydantic import BaseSettings, Field, validator
 
 
 class Settings(BaseSettings):
-    # Required
     bot_token: str = Field(..., env="BOT_TOKEN")
-
-    # Optional controls
-    allowed_chats: Optional[str] = Field(None, env="ALLOWED_CHATS")
-    cache_ttl: int = Field(30, env="CACHE_TTL")
+    cache_ttl: int = Field(60, env="CACHE_TTL")
     http_retries: int = Field(3, env="HTTP_RETRIES")
     http_timeout: int = Field(10, env="HTTP_TIMEOUT")
-    parse_mode: str = Field("MarkdownV2", env="PARSE_MODE")
-    log_level: str = Field("INFO", env="LOG_LEVEL")
+    parse_mode: str = Field("HTML", env="PARSE_MODE")
     rate_limit_cooldown: float = Field(0.7, env="RATE_LIMIT_COOLDOWN")
+    log_level: str = Field("INFO", env="LOG_LEVEL")
+    allowed_chats_raw: Optional[str] = Field(None, env="ALLOWED_CHATS")
+
+    # normalized list (ints) built from allowed_chats_raw
+    allowed_chats: List[int] = Field(default_factory=list)
+
+    @validator("allowed_chats", pre=True, always=True)
+    def _normalize_allowed(cls, v, values):
+        raw = values.get("allowed_chats_raw")
+        if not raw:
+            return []
+        items = [s.strip() for s in raw.split(",") if s.strip()]
+        out: List[int] = []
+        for s in items:
+            try:
+                # support negative IDs (groups/supergroups) and positives (users/chats)
+                out.append(int(s))
+            except ValueError:
+                # skip invalid entries silently
+                continue
+        return out
+
+    def is_chat_allowed(self, chat_id: int) -> bool:
+        # empty list means allow all
+        if not self.allowed_chats:
+            return True
+        try:
+            return int(chat_id) in self.allowed_chats
+        except Exception:
+            return False
 
     class Config:
         env_file = ".env"
-        env_file_encoding = "utf-8"
-        validate_assignment = True
-
-    @validator("allowed_chats", pre=True)
-    def _normalize_allowed_chats(cls, v: Optional[str]) -> Optional[str]:
-        """
-        Normalize comma-separated input into a clean comma-separated string of ints.
-        Accepts values like: "123,-456, 789" and returns "123,-456,789".
+        case_sensitive = False        Accepts values like: "123,-456, 789" and returns "123,-456,789".
         Non-integer parts are ignored.
         """
         if v is None:
