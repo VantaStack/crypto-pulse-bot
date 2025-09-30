@@ -1,199 +1,157 @@
 # src/utils.py
 """
-Safe parsing, numeric evaluation and formatting utilities.
+Utility functions:
+- safe_eval_decimal(expr): evaluate simple arithmetic to Decimal using AST whitelist
+- parse_amount_and_pair(text): extract amount, base, quote (defaults amount=1)
+- format_price(amount, price, base, quote): professional output with thousand separators
 
-Principles:
-- All financial math uses Decimal with a fixed context.
-- Numeric expressions are evaluated via AST with a strict whitelist of nodes.
-- Parsing accepts common user forms like:
-    "1.2 ETH to USD"
-    "eth to usd"         -> amount defaults to 1
-    "(1.2 + 0.3) eth to usd"
-    "100 usd btc"        -> fallback: last token is quote
-- Errors raise ValueError with a clear message (handlers can catch and localize).
-- Formatting produces thousand separators and trims trailing zeros.
+Examples:
+  parse_amount_and_pair("1.5 btc to usd") -> (Decimal("1.5"), "BTC", "USD")
+  format_price(Decimal("1.5"), Decimal("2000"), "BTC", "USD")
 """
 from __future__ import annotations
 
 import ast
 import re
-from decimal import Decimal, getcontext, ROUND_HALF_EVEN
-from typing import Tuple
+from decimal import Decimal, getcontext
 
-# Decimal context: high precision for intermediate ops, banking rounding
+
+# set reasonable precision; adjust if needed
 getcontext().prec = 28
-getcontext().rounding = ROUND_HALF_EVEN
 
-# Allowed AST node types for safe numeric expressions
-_ALLOWED_BINOPS = {
+_ALLOWED_NODES = {
+    ast.Expression,
+    ast.BinOp,
+    ast.UnaryOp,
+    ast.Num,
     ast.Add,
     ast.Sub,
     ast.Mult,
     ast.Div,
-    ast.Pow,
-    ast.Mod,
+    ast.USub,
+    ast.UAdd,
+    ast.Pow,  # optional; consider removing if you fear large exponents
+    ast.Mod,  # optional
+    ast.FloorDiv,  # optional
 }
-_ALLOWED_UNARYOPS = {ast.UAdd, ast.USub}
-_ALLOWED_NODES = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Num, ast.Constant, ast.Tuple, ast.Subscript, ast.Load, ast.Name)
 
-_MAX_EXPONENT = 10
-
-_SYMBOL_RE = re.compile(r"^[A-Za-z]{1,10}$")
+_MAX_EXPR_LEN = 64
+_MAX_DEPTH = 10
 
 
 def safe_eval_decimal(expr: str) -> Decimal:
     """
-    Safely evaluate a numeric expression and return Decimal.
-    Supports + - * / % ** and unary ops and parentheses.
-    Raises ValueError on disallowed constructs or invalid input.
+    Safely evaluate a simple arithmetic expression into Decimal.
+    Supports +, -, *, / (and optionally **, %, //) on numeric literals.
     """
-    if not expr or not expr.strip():
+    expr = (expr or "").strip()
+    if not expr:
         raise ValueError("Empty expression")
+    if len(expr) > _MAX_EXPR_LEN:
+        raise ValueError("Expression too long")
 
-    try:
-        node = ast.parse(expr, mode="eval")
-    except SyntaxError as e:
-        raise ValueError(f"Syntax error in expression: {e}") from e
+    node = ast.parse(expr, mode="eval")
 
-    return _eval_node(node.body)
+    def _check(n: ast.AST, depth: int = 0):
+        if depth > _MAX_DEPTH:
+            raise ValueError("Expression too deep")
+        if type(n) not in _ALLOWED_NODES:
+            raise ValueError(f"Disallowed node: {type(n).__name__}")
+        for child in ast.iter_child_nodes(n):
+            _check(child, depth + 1)
+
+    _check(node)
+
+    def _eval(n: ast.AST) -> Decimal:
+        if isinstance(n, ast.Expression):
+            return _eval(n.body)
+        if isinstance(n, ast.Num):
+            return Decimal(str(n.n))
+        if isinstance(n, ast.UnaryOp):
+            val = _eval(n.operand)
+            if isinstance(n.op, ast.UAdd):
+                return val
+            if isinstance(n.op, ast.USub):
+                return -val
+        if isinstance(n, ast.BinOp):
+            left = _eval(n.left)
+            right = _eval(n.right)
+            if isinstance(n.op, ast.Add):
+                return left + right
+            if isinstance(n.op, ast.Sub):
+                return left - right
+            if isinstance(n.op, ast.Mult):
+                return left * right
+            if isinstance(n.op, ast.Div):
+                # avoid division by zero
+                if right == 0:
+                    raise ValueError("Division by zero")
+                return left / right
+            if isinstance(n.op, ast.Pow):
+                # limit exponent to avoid DoS
+                if right > 8:
+                    raise ValueError("Exponent too large")
+                return left ** right
+            if isinstance(n.op, ast.Mod):
+                return left % right
+            if isinstance(n.op, ast.FloorDiv):
+                if right == 0:
+                    raise ValueError("Division by zero")
+                return left // right
+        raise ValueError("Invalid expression")
+
+    return _eval(node)
 
 
-def _eval_node(node: ast.AST) -> Decimal:
-    if isinstance(node, ast.Constant):
-        if isinstance(node.value, (int, float)):
-            return Decimal(str(node.value))
-        raise ValueError("Only numeric constants are allowed")
-    if isinstance(node, ast.Num):  # py<3.8 fallback
-        return Decimal(str(node.n))
-
-    if isinstance(node, ast.BinOp) and type(node.op) in _ALLOWED_BINOPS:
-        left = _eval_node(node.left)
-        right = _eval_node(node.right)
-        op = type(node.op)
-        if op is ast.Add:
-            return left + right
-        if op is ast.Sub:
-            return left - right
-        if op is ast.Mult:
-            return left * right
-        if op is ast.Div:
-            if right == Decimal("0"):
-                raise ValueError("Division by zero")
-            return left / right
-        if op is ast.Mod:
-            if right == Decimal("0"):
-                raise ValueError("Modulo by zero")
-            return left % right
-        if op is ast.Pow:
-            try:
-                exp = int(right)
-            except Exception:
-                raise ValueError("Exponent must be an integer")
-            if abs(exp) > _MAX_EXPONENT:
-                raise ValueError("Exponent too large")
-            return left ** exp
-
-    if isinstance(node, ast.UnaryOp) and type(node.op) in _ALLOWED_UNARYOPS:
-        val = _eval_node(node.operand)
-        if isinstance(node.op, ast.USub):
-            return -val
-        return val
-
-    raise ValueError("Unsupported expression")
+_PAIR_RE = re.compile(
+    r"""
+    ^\s*
+    (?:(?P<amount>[-+]?\d+(?:\.\d+)?)\s+)?     # optional amount
+    (?P<base>[A-Za-z]{2,10})                   # base symbol
+    \s+(?:to|->|/)\s+                          # separator
+    (?P<quote>[A-Za-z]{2,10})                  # quote symbol
+    \s*$
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
 
 
-def _split_to_left_right(text: str) -> Tuple[str, str]:
+def parse_amount_and_pair(text: str):
     """
-    Split user text into left (amount+base) and right (quote) by ' to ' (case-insensitive).
-    If ' to ' not present, fallback: last token is quote.
+    Parse queries like:
+      "eth to usd" -> amount=1, base=ETH, quote=USD
+      "1.5 btc to usd" -> amount=1.5, base=BTC, quote=USD
+    Raises ValueError on invalid input.
     """
-    if " to " in text.lower():
-        left, right = re.split(r"\s+to\s+", text, flags=re.IGNORECASE, maxsplit=1)
-        return left.strip(), right.strip()
-    tokens = text.strip().split()
-    if len(tokens) < 2:
-        raise ValueError("Invalid input: expected '<amount> <symbol> to <quote>'")
-    return " ".join(tokens[:-1]).strip(), tokens[-1].strip()
+    text = (text or "").strip()
+    m = _PAIR_RE.match(text)
+    if not m:
+        raise ValueError("Invalid query format")
+    amt = m.group("amount")
+    base = m.group("base").upper()
+    quote = m.group("quote").upper()
+    amount = Decimal(amt) if amt is not None else Decimal("1")
+    return amount, base, quote
 
 
-def parse_amount_and_pair(text: str) -> Tuple[Decimal, str, str]:
+def _thousands(n: Decimal) -> str:
+    # simple thousand separator for integers; keep decimals intact
+    s = f"{n:.8f}".rstrip("0").rstrip(".")
+    parts = s.split(".")
+    integer = parts[0]
+    frac = parts[1] if len(parts) > 1 else None
+    integer_fmt = "{:,}".format(int(integer))
+    return integer_fmt if frac is None else f"{integer_fmt}.{frac}"
+
+
+def format_price(amount: Decimal, price: Decimal, base: str, quote: str) -> str:
     """
-    Parse user-friendly input and return (amount: Decimal, base_symbol: UPPER, quote_symbol: UPPER).
-
-    Raises ValueError on invalid formats.
+    Format output like:
+      "1.5 BTC = 3,000.00 USD\nprice: 2,000.00 USD/BTC"
+    Uses reasonable precision and separators.
     """
-    if not text or not text.strip():
-        raise ValueError("Empty query")
-
-    left, right = _split_to_left_right(text)
-
-    left_tokens = left.split()
-    if not left_tokens:
-        raise ValueError("Invalid left-hand side")
-
-    maybe_sym = left_tokens[-1]
-    if _SYMBOL_RE.match(maybe_sym):
-        base_sym = maybe_sym.upper()
-        expr = " ".join(left_tokens[:-1]) or "1"
-    else:
-        raise ValueError("Base symbol missing or invalid")
-
-    quote = right.upper()
-    if not _SYMBOL_RE.match(quote):
-        raise ValueError("Quote symbol missing or invalid")
-
-    amt = safe_eval_decimal(expr)
-
-    if amt < Decimal("0"):
-        raise ValueError("Amount must be non-negative")
-
-    return amt, base_sym, quote
-
-
-def _quantize_for_display(d: Decimal, max_decimals: int = 8) -> Decimal:
-    """
-    Quantize Decimal for display: if integer keep as-is, otherwise quantize to max_decimals.
-    """
-    if d == d.to_integral():
-        return d
-    q = Decimal(1).scaleb(-max_decimals)  # 10^-max_decimals
-    return d.quantize(q)
-
-
-def _thousand_sep(s: str) -> str:
-    """
-    Insert comma as thousand separator for integer part, keep fractional part intact.
-    """
-    if "." not in s:
-        int_part = s
-        frac = ""
-    else:
-        int_part, frac = s.split(".", 1)
-        frac = "." + frac
-    sign = ""
-    if int_part.startswith("-"):
-        sign = "-"
-        int_part = int_part[1:]
-    int_part_with_commas = "{:,}".format(int(int_part)) if int_part else "0"
-    return f"{sign}{int_part_with_commas}{frac}"
-
-
-def format_price(amount: Decimal, price: Decimal, base_sym: str, quote_sym: str, max_decimals: int = 8) -> str:
-    """
-    Format conversion result:
-      "<amount> BASE ≈ <total> QUOTE"
-    Thousand separators for readability; trailing zeros trimmed.
-    """
-    if amount is None or price is None:
-        raise ValueError("Amount and price are required")
-
     total = (amount * price)
-    amt_q = _quantize_for_display(amount, max_decimals)
-    total_q = _quantize_for_display(total, max_decimals)
-
-    def dec_to_str(d: Decimal) -> str:
-        s = format(d.normalize(), "f")
-        s = s.rstrip("0").rstrip(".") if "." in s else s
-        return _thousand_sep(s)
-
-    return f"{dec_to_str(amt_q)} {base_sym} ≈ {dec_to_str(total_q)} {quote_sym}"
+    return (
+        f"{amount} {base} = {_thousands(total)} {quote}\n"
+        f"price: {_thousands(price)} {quote}/{base}"
+)
